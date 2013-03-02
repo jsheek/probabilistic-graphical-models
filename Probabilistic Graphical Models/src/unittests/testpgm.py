@@ -15,9 +15,9 @@ class Test(unittest.TestCase):
         self.raw_beliefs = []
         self.shapes = []
         self.factors = []
-        self.states_list.append(scipy.array([0, 1]))
-        self.states_list.append(scipy.array([0, 1]))
-        self.states_list.append(scipy.array([0, 1]))
+        self.states_list.append((0, 1))
+        self.states_list.append((0, 1))
+        self.states_list.append((0, 1))
         self.raw_beliefs.append([0.11, 0.89])
         self.raw_beliefs.append([0.59, 0.41, 0.22, 0.78])
         self.raw_beliefs.append([0.39, 0.61, 0.06, 0.94])
@@ -33,6 +33,8 @@ class Test(unittest.TestCase):
         self.factors.append(pgm.Factor([self.rvars[1], self.rvars[0]], self.beliefs[1]))
         self.factors.append(pgm.Factor([self.rvars[2], self.rvars[1]], self.beliefs[2]))
         
+        scipy.random.seed(6441)
+        
     def tearDown(self):
         pass
         
@@ -40,30 +42,51 @@ class Test(unittest.TestCase):
         for (factor, belief) in zip(self.factors, self.raw_beliefs):
             assert scipy.allclose(factor.beliefs.ravel(order = 'F'), belief)
         
-    def testReordering(self):
-        pass
+    def testRandomVariableInputValidation(self):
+        with self.assertRaises(AssertionError):
+            self.rvars[0].state = "QUX"
     
+    def testFactorInputValidation(self):
+        with self.assertRaises(AssertionError):
+            pgm.Factor("SPAM", self.beliefs[0])
+        #TODO: revisit this when more belief types are implemented
+        with self.assertRaises(NotImplementedError):
+            pgm.Factor([self.rvars[0]], "EGGS")
+    
+    def testRandomVariableSequenceBehavior(self):
+        assert all(tuple(rvar) == tuple(states) for (rvar, states)
+                in zip(self.rvars, self.states_list))
+        
+        rvar = self.rvars[0]
+        self.assertIsNone(rvar.index())
+        self.assertIsNone(rvar.index(3))
+        self.assertEqual(rvar.index(1), 1)
+        self.assertEqual(rvar.count(0), 1)
+        self.assertEqual(rvar.count(3), 0)
+        assert 0 in rvar
+        assert 3 not in rvar
+                    
     def testObservation(self):
         for (k, state) in enumerate(self.states_list[0]):
             self.rvars[0].state = state
             assert (self.factors[0].beliefs == self.beliefs[0][k]).all()
             assert (self.factors[1].beliefs == self.beliefs[1][:, k]).all()
             assert (self.factors[2].beliefs == self.beliefs[2]).all()
-        self.rvars[0].state = None
+        self.rvars[0].reset()
         
         for (k, state) in enumerate(self.states_list[1]):
             self.rvars[1].state = state
             assert (self.factors[0].beliefs == self.beliefs[0]).all()
             assert (self.factors[1].beliefs == self.beliefs[1][k, :]).all()
             assert (self.factors[2].beliefs == self.beliefs[2][:, k]).all()
-        self.rvars[1].state = None
+        self.rvars[1].reset()
         
         for (k, state) in enumerate(self.states_list[2]):
             self.rvars[2].state = state
             assert (self.factors[0].beliefs == self.beliefs[0]).all()
             assert (self.factors[1].beliefs == self.beliefs[1]).all()
             assert (self.factors[2].beliefs == self.beliefs[2][k, :]).all()
-        self.rvars[2].state = None
+        self.rvars[2].reset()
         
     def testMarginalization(self):
         self.marginals = []
@@ -105,6 +128,16 @@ class Test(unittest.TestCase):
         #Marginal
         self.reduced_factor = pgm.Factor.marginalize(self.joint_factor, [self.rvars[1]])
         assert scipy.allclose(self.reduced_factor.probabilities, self.reduced_probabilities)
+        
+    def testRandomSampling(self):
+        self.assertEqual(self.factors[1].sample(), (1, 1))
+        self.assertEqual(self.factors[1].sample(), (1, 0))
+        self.assertEqual(self.factors[1].sample(), (1, 1))
+        self.assertEqual(self.factors[1].sample(), (1, 1))
+        self.assertEqual(self.factors[1].sample(), (1, 0))
+        self.assertEqual(self.factors[1].sample(), (0, 0))
+        self.assertEqual(self.factors[1].sample(), (0, 1))
+        self.assertEqual(self.factors[1].sample(), (1, 1))
         
 if __name__ == "__main__":
     #import sys;sys.argv = ['', 'Test.testName']

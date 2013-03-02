@@ -5,6 +5,13 @@ Created on Feb 9, 2013
 '''
 
 import scipy
+try:
+    from collections.abc import Sequence as AbstractSequence
+except ImportError:
+    from collections import Sequence as AbstractSequence
+from pygraph.classes.graph import graph as Graph
+from pygraph.classes.digraph import digraph as DirectedGraph
+from pygraph.algorithms.cycles import find_cycle
 
 #DONE: Implement 'RandomVariable' class
 #DONE: Implement 'Factor' class
@@ -25,13 +32,13 @@ class Subject:
     """
     def __init__(self, *args, **kwargs):
         self._observers = set()
+    def _observe(self, *args, **kwargs):
+        for observer in self._observers:
+            observer.notify(self, *args, **kwargs)
     def register(self, observer):
         self._observers.add(observer)
     def unregister(self, observer):
         self._observers.discard(observer)
-    def observe(self, *args, **kwargs):
-        for observer in self._observers:
-            observer._notify(*args, **kwargs)
         
     
 class Observer:
@@ -40,23 +47,27 @@ class Observer:
     """
     def __init__(self, *args, **kwargs):
         pass
-    def _notify(self, *args, **kwargs):
-        raise NotImplementedError
-    def register(self, subject):
+    def _register(self, subject):
         subject.register(self)
-    def unregister(self, subject):
+    def _unregister(self, subject):
         subject.unregister(self)
+    def notify(self, subject, *args, **kwargs):
+        raise NotImplementedError
         
     
-class RandomVariable(Subject):
+class RandomVariable(Subject, AbstractSequence):
     """
-    Each RandomVariable has a collection of distinct values
+    Each RandomVariable is a collection of distinct values
     representing the allowed instantiations of that random variable,
     commonly called the sample space or state space.
     
     A RandomVariable can be "observed" (in the scientific sense)
     in one of its states. If so, then it will notify all observers that
-    its state has been set, but they must query to know what state that is.
+    its state has been set, but they must query (at their discretion)
+    to know what state that is.
+    
+    A RandomVariable which is not "observed" is called "hidden", or, rarely,
+    "mixed".
     
     The RandomVariable is also responsible for knowing the size of its
     state space, i.e. its cardinality.
@@ -67,39 +78,67 @@ class RandomVariable(Subject):
     (2) The "classic" FICO score has a state space (300, 301, ..., 850)
         http://en.wikipedia.org/wiki/Credit_score_in_the_United_States#FICO_score_range
     
-    In Physics, a RandomVariable is typically called a Local Field (Variable).
+    In Physics, a RandomVariable is typically called a Local Field (Variable)
+    or, in other contexts, a (Quantum) State.
     
     ---FOR NOW: ONLY IMPLEMENT DISCRETE RANDOM VARIABLES---
     TODO: Implement continuous random variables
     """
+    
+    _hidden_state = None
+    
+    def _broadcasts(self = None):
+        #TODO: Think about this design choice -- is this really what I want?
+        def decorator(func):
+            def wrapper(self, *__args, **__kwargs):
+                wrapper.__name__ = func.__name__
+                wrapper.__doc__ = func.__doc__
+                func(self, *__args, **__kwargs)
+                self._observe()
+            return wrapper
+        return decorator
     
     def __init__(self, states):
         """
         Construct a RandomVariable with the chosen state space,
         representing the possible realizations of some random variable.
         
-        states -- the allowed instantiations of this random variable
+        states -- the allowed (unique) instantiations of this random variable
         """
         super().__init__()
-        if not isinstance(states, scipy.ndarray):
-            raise NotImplementedError
-        if states.ndim is not 1:
-            raise NotImplementedError
-        self._states = states
+        assert isinstance(states, AbstractSequence), \
+                "The states must form an indexed collection."
+        self._ordering = {state : index for (index, state) in enumerate(states)}
+        if self._hidden_state in self._ordering:
+            raise KeyError("{} is not a valid state.".format(self._hidden_state))
+        #the following will reconstruct the states in the original order,
+        #but as a tuple and, furthermore, with duplicates removed
+        self._states = tuple(sorted(self._ordering.keys(), key = self._ordering.get))
         self._cardinality = len(self._states)
-        self._state = None
-        self._index_of_state = None
+        self._set_hidden_state()
+        
+    #AbstractSequence methods
+    def __getitem__(self, index):
+        return self._states[index]
+    def __len__(self):
+        return self._cardinality
+    def __contains__(self, value):
+        return value in self._ordering
+    def __iter__(self):
+        return iter(self._states)
+    def __reversed__(self):
+        return reversed(self._states)
+    def index(self, value = None):
+        if value is None:
+            value = self._state
+        return self._ordering.get(value)
+    def count(self, value):
+        #only returns 0 or 1 since the states are unique
+        return 1 if value in self._ordering else 0
     
-#    def __repr__(self):
-#        if self._state is None:
-#            return 'RandomVariable({!r})'.format(self._states)
-#        else:
-#            return '{!r}'.format(self._state)
-    def _index_of(self, s):
-        try:
-            return next(scipy.argwhere(self._states == s).flat)
-        except StopIteration:
-            return None
+    def _set_hidden_state(self):
+        self._hidden = True
+        self._state = self._hidden_state
         
     @property
     def states(self):
@@ -108,17 +147,22 @@ class RandomVariable(Subject):
     def cardinality(self):
         return self._cardinality
     @property
+    def hidden(self):
+        return self._hidden
+    @property
     def state(self):
         return self._state
     @state.setter
+    @_broadcasts()
     def state(self, s):
+        assert s in self._ordering, \
+            "Invalid state assignment, {}, selected.".format(s)
+        self._hidden = False
         self._state = s
-        self._index_of_state = self._index_of(s)
-        self.observe(self)
-    @property
-    def index_of_state(self):
-        return self._index_of_state
     
+    @_broadcasts()
+    def reset(self):
+        self._set_hidden_state()
 
 class Factor(Observer):
     """
@@ -137,8 +181,8 @@ class Factor(Observer):
     In Physics, a Factor is typically called a (Field) Potential or
     a Local (Field) Operator.
     
-    ---FOR NOW: ONLY IMPLEMENT (1)---
-    TODO: Implement (2) through (5)
+    ---FOR NOW: ONLY IMPLEMENT (1 & 2)---
+    TODO: Implement (3) through (5)
     """
     
     #TODO: Design question... Should these all be static methods?"   
@@ -242,7 +286,7 @@ class Factor(Observer):
         return Factor(permuted_scope, factor.beliefs.transpose(permutation))
     
     def _mutates_proxies(self = None):
-        "TODO: Think about this design choice -- is this really what I want?"
+        #TODO: Think about this design choice -- is this really what I want?
         def decorator(func):
             def wrapper(self, *__args, **__kwargs):
                 wrapper.__name__ = func.__name__
@@ -251,20 +295,20 @@ class Factor(Observer):
                 self._proxify()
             return wrapper
         return decorator
-    
+        
     @_mutates_proxies()
     def __init__(self, scope, beliefs):
         """
-        scope -- a collection of distinct random variables that
+        Construct a Factor that knows about the random variables in the input
+        scope and has the input beliefs about them.
+        
+        scope   -- an indexed collection of distinct random variables that
                     this factor has beliefs about
-        beliefs  -- a scipy/numpy array (possibly 0-rank) of real numbers with
+        beliefs -- a scipy/numpy array (possibly 0-rank) of real numbers with
                     (1) beliefs.ndim == len(scope)
                     (2) beliefs.shape[k] == scope[k].cardinality for all k
                     (3) Order of axes should reflect the order of random variables
-                        in the scope!
-                        
-        N.B. If 'scope' is empty and 'beliefs' is scipy.array(0) or scipy.array(1), these
-        represent the 'identity factors' for addition and multiplication respectively.
+                        in the scope!    
         """
         super().__init__()
         if not isinstance(beliefs, scipy.ndarray):
@@ -274,26 +318,22 @@ class Factor(Observer):
                 "The beliefs must all be real numbers."
         assert beliefs.ndim == len(scope), \
                 "The beliefs do not match the scope."
+        assert isinstance(scope, AbstractSequence), \
+                "The scope must be an indexed collection."
         assert all(isinstance(rvar, RandomVariable) for rvar in scope), \
                 "The scope must be a collection of random variables."
         assert all(num_states == rvar.cardinality
                    for (num_states, rvar) in zip(beliefs.shape, scope)), \
                 "The beliefs do not match the cardinalities of the random variables."
-        assert hasattr(scope, 'index'), \
-                "The scope must be an indexed collection."
         self._scope = scope
         self._beliefs = beliefs
         for rvar in self._scope:
-            self.register(rvar)
+            self._register(rvar)
         
-#    def __mul__(self, other):
-#        return Factor.product(self, other)
-#    def _axis_of(self, rvar):
-#        return self._scope.index(rvar)
     def _proxify(self):
-        self._proxy_scope = [rvar for rvar in self._scope if rvar.state is None]
-        subslice = tuple(slice(None) if rvar.state is None else rvar.index_of_state
-                    for rvar in self._scope)
+        self._proxy_scope = [rvar for rvar in self._scope if rvar.hidden]
+        subslice = tuple(slice(None) if rvar.hidden else rvar.index()
+                         for rvar in self._scope)
         #makes subtle use of [()] indexing in case belief is 0-rank
         #self._beliefs is -always- an ndarray, whereas
         #self._proxy_beliefs is often an ndarray, but may be a scalar,
@@ -301,7 +341,7 @@ class Factor(Observer):
         self._proxy_beliefs = self._beliefs[subslice]
         
     @_mutates_proxies()
-    def _notify(self, rvar):
+    def notify(self, rvar):
         pass
         
     @property
@@ -313,22 +353,98 @@ class Factor(Observer):
     @property
     def probabilities(self):
         return self.beliefs / self.beliefs.sum()
+    
+    def sample(self):
+        cumulative_measures = self.beliefs.cumsum().reshape(self.beliefs.shape)
+        random_measure = scipy.random.random() * self.beliefs.sum()
+        indices = scipy.argwhere(cumulative_measures > random_measure)[0]
+        return tuple(rvar[index] for (rvar, index) in zip(self.scope, indices))
 
+class CPD(Factor):
+    """
+    A CPD, or "Conditional Probability Distribution", is a Factor representing
+    P(child | parents).
+    
+    Its scope should be of the form [child, parent1, parent2, ...].
+    Its beliefs will initially be normalized along the child axis. 
+    """
+    def __init__(self, scope, beliefs):
+        self._child = scope[0]
+        self._parents = scope[1 : ]
+        super().__init__(self, scope, beliefs / beliefs.sum(axis = 0))
+    
+    @property
+    def child(self):
+        return self._child
+    @property
+    def parents(self):
+        return self._parents
 
+class BipartiteGraph(Graph):
+    """
+    A BipartiteGraph is a Graph in which the vertices can be divided into
+    two disjoint sets such that all edges connect vertices in different subsets.
+    
+    G = (U, V, E) is the usual representation of such a graph,
+    with e == (u, v) for each e in E, for some (u, v) pair in UxV.
+    
+    However, a more concise representation, used here, is of the form:
+    {'u_1' : ['v_4', 'v_3'], ... 'u_m' : ['v_1', 'v_3', 'v_n']}
+    This is essentially the adjacency list representation.
+    """
+    def __init__(self, adjacencies):
+        """
+        Construct a BipartiteGraph connecting vertices according to the input
+        adjacencies.
+        
+        adjacencies -- a dictionary of adjacency lists containing node names as strings
+        """
+        super().__init__()
+        self.add_nodes(set.union(set(adjacencies.keys()),
+                                     *map(set, adjacencies.values())))
+        for (u, vs) in adjacencies.items():
+            for v in vs:
+                self.add_edge((u, v))
+    
+class DirectedAcyclicGraph(DirectedGraph):
+    #TODO: Figure out why I'm repeating myself here, re: BipartiteGraph
+    def __init__(self, adjacencies):
+        super().__init__()
+        self.add_nodes(set.union(set(adjacencies.keys()),
+                                     *map(set, adjacencies.values())))
+        for (u, vs) in adjacencies.items():
+            for v in vs:
+                self.add_edge((u, v))
+        if find_cycle(self):
+            raise TypeError("Cycle detected!")
+    
+class BayesNet:
+    def __init__(self, cpds, rvar_labels):
+        self._cpds = cpds
+        self._rvars = rvar_labels.keys()
+        self._adjacencies = {rvar_labels[cpd.child] : [rvar_labels[parent]
+                             for parent in cpd.parents] for cpd in cpds}
+        self._graph = DirectedAcyclicGraph(self._adjacencies).reverse()
+        
 class Model:
     """
     A Model is a collection of RandomVariables together with Factors that encode
     beliefs about (subsets of) those variables and their interdependencies.
     
     Important examples include:
-    (1) Bayesian Networks
+    (1) Bayesian Networks (including Bayes Classifiers, 2TBNs)
     (2) Markov Random Fields (including Ising Models, Restricted Boltzmann Machines)
     (3) Non-graphical Models (?)
     
     ---FOR NOW: ONLY IMPLEMENT (1) and (2) ---
     """
     
-    def __init__(self, params):
+    def __init__(self):
         """
         Constructor
         """
+        pass
+    
+
+if __name__ == '__main__':
+    pass
