@@ -100,7 +100,7 @@ class RandomVariable(Subject, AbstractSequence):
     
     def __init__(self, states):
         """
-        Construct a RandomVariable with the chosen state space,
+        Return a RandomVariable with the chosen state space,
         representing the possible realizations of some random variable.
         
         states -- the allowed (unique) instantiations of this random variable
@@ -299,7 +299,7 @@ class Factor(Observer):
     @_mutates_proxies()
     def __init__(self, scope, beliefs):
         """
-        Construct a Factor that knows about the random variables in the input
+        Return a Factor that knows about the random variables in the input
         scope and has the input beliefs about them.
         
         scope   -- an indexed collection of distinct random variables that
@@ -371,7 +371,7 @@ class CPD(Factor):
     def __init__(self, scope, beliefs):
         self._child = scope[0]
         self._parents = scope[1 : ]
-        super().__init__(self, scope, beliefs / beliefs.sum(axis = 0))
+        super().__init__(scope, beliefs / beliefs.sum(axis = 0))
     
     @property
     def child(self):
@@ -380,7 +380,29 @@ class CPD(Factor):
     def parents(self):
         return self._parents
 
-class BipartiteGraph(Graph):
+class AdjacencyBuilderMixin:
+    """
+    Adds a method that builds a graph-like object from an adjacency list
+    representation of the form:
+    
+    {'u_1' : ['v_4', 'v_3'], ... 'u_m' : ['v_1', 'v_3', 'v_n']}
+    """
+    def add_adjacencies(self, adjacencies, reverse = False):
+        """
+        adjacencies -- a dictionary of adjacency lists containing node names as strings
+        """
+        self.add_nodes(set.union(set(adjacencies.keys()),
+                                     *map(set, adjacencies.values())))
+        if not reverse:
+            for (u, vs) in adjacencies.items():
+                for v in vs:
+                    self.add_edge((u, v))
+        else:
+            for (u, vs) in adjacencies.items():
+                for v in vs:
+                    self.add_edge((v, u))
+                
+class BipartiteGraph(Graph, AdjacencyBuilderMixin):
     """
     A BipartiteGraph is a Graph in which the vertices can be divided into
     two disjoint sets such that all edges connect vertices in different subsets.
@@ -388,35 +410,31 @@ class BipartiteGraph(Graph):
     G = (U, V, E) is the usual representation of such a graph,
     with e == (u, v) for each e in E, for some (u, v) pair in UxV.
     
-    However, a more concise representation, used here, is of the form:
-    {'u_1' : ['v_4', 'v_3'], ... 'u_m' : ['v_1', 'v_3', 'v_n']}
-    This is essentially the adjacency list representation.
+    However this uses a more concise representation, the adjacency list.
     """
-    def __init__(self, adjacencies):
+    def __init__(self, adjacencies = None):
         """
-        Construct a BipartiteGraph connecting vertices according to the input
+        Return a BipartiteGraph connecting vertices according to the input
         adjacencies.
-        
-        adjacencies -- a dictionary of adjacency lists containing node names as strings
         """
         super().__init__()
-        self.add_nodes(set.union(set(adjacencies.keys()),
-                                     *map(set, adjacencies.values())))
-        for (u, vs) in adjacencies.items():
-            for v in vs:
-                self.add_edge((u, v))
+        if adjacencies is not None:
+            U = set(adjacencies.keys())
+            V = set.union(*map(set, adjacencies.values()))
+            if U & V:
+                raise TypeError("Adjacencies do not form a bipartition!")
+            self.add_adjacencies(adjacencies)
     
-class DirectedAcyclicGraph(DirectedGraph):
-    #TODO: Figure out why I'm repeating myself here, re: BipartiteGraph
-    def __init__(self, adjacencies):
+class DirectedAcyclicGraph(DirectedGraph, AdjacencyBuilderMixin):
+    """
+    A DirectedAcyclicGraph is a DirectedGraph which has no cycles.
+    """
+    def __init__(self, adjacencies = None, reverse = False):
         super().__init__()
-        self.add_nodes(set.union(set(adjacencies.keys()),
-                                     *map(set, adjacencies.values())))
-        for (u, vs) in adjacencies.items():
-            for v in vs:
-                self.add_edge((u, v))
-        if find_cycle(self):
-            raise TypeError("Cycle detected!")
+        if adjacencies is not None:
+            self.add_adjacencies(adjacencies, reverse)
+            if find_cycle(self):
+                raise TypeError("Cycle detected!")
     
 class BayesNet:
     def __init__(self, cpds, rvar_labels):
@@ -424,7 +442,11 @@ class BayesNet:
         self._rvars = rvar_labels.keys()
         self._adjacencies = {rvar_labels[cpd.child] : [rvar_labels[parent]
                              for parent in cpd.parents] for cpd in cpds}
-        self._graph = DirectedAcyclicGraph(self._adjacencies).reverse()
+        self._graph = DirectedAcyclicGraph(self._adjacencies, reverse = True)
+        
+    @property
+    def graph(self):
+        return self._graph
         
 class Model:
     """
