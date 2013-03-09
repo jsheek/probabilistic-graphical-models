@@ -30,7 +30,7 @@ class Subject:
     """
     Used as a base class for the Subject of the Observer Pattern.
     """
-    def __init__(self, *args, **kwargs):
+    def __init__(self):
         self._observers = set()
     def _observe(self, *args, **kwargs):
         for observer in self._observers:
@@ -45,7 +45,7 @@ class Observer:
     """
     Used as a base class for the Observer of the Observer Pattern.
     """
-    def __init__(self, *args, **kwargs):
+    def __init__(self):
         pass
     def _register(self, subject):
         subject.register(self)
@@ -261,10 +261,12 @@ class Factor(Observer):
                         for factor in factors]
         permutations = [tuple(map(factor.scope.index, subscope))
                         for (factor, subscope) in zip(factors, subscopes)]
-        slices = [tuple(slice(None) if rvar in factor.scope else scipy.newaxis
-                        for rvar in joint_scope) for factor in factors]
+        slices = [tuple(slice(None) if rvar in factor.scope
+                        else scipy.newaxis for rvar in joint_scope)
+                        for factor in factors]
         beliefs = [factor.beliefs.transpose(permutation)[slice_]
-                   for (factor, permutation, slice_) in zip(factors, permutations, slices)]
+                        for (factor, permutation, slice_)
+                        in zip(factors, permutations, slices)]
         joint_beliefs = scipy.multiply.reduce(beliefs)
         return Factor(joint_scope, joint_beliefs)
     @staticmethod
@@ -282,8 +284,16 @@ class Factor(Observer):
         assert set(factor.scope) == set(target_scope), \
             "The factor scope and target scope must be related by a permutation."
         permutation = tuple(map(factor.scope.index, target_scope))
-        permuted_scope = [factor.scope[j] for j in permutation]
-        return Factor(permuted_scope, factor.beliefs.transpose(permutation))
+        #permuted_scope = [factor.scope[j] for j in permutation]
+        return Factor(target_scope, factor.beliefs.transpose(permutation))
+    @staticmethod
+    def random(target_scope):
+        """
+        Return a randomly generated Factor that has the target scope.
+        """
+        target_shape = tuple(rvar.cardinality for rvar in target_scope)
+        random_beliefs = scipy.random.random(target_shape)
+        return Factor(target_scope, random_beliefs)
     
     def _mutates_proxies(self = None):
         #TODO: Think about this design choice -- is this really what I want?
@@ -352,9 +362,12 @@ class Factor(Observer):
         return self._proxy_beliefs
     @property
     def probabilities(self):
+        #only makes probabilistic sense in the case of joint distributions
         return self.beliefs / self.beliefs.sum()
     
     def sample(self):
+        #interesting idea, but, presumably, it only makes probabilistic sense
+        #in the case of joint distributions
         cumulative_measures = self.beliefs.cumsum().reshape(self.beliefs.shape)
         random_measure = scipy.random.random() * self.beliefs.sum()
         indices = scipy.argwhere(cumulative_measures > random_measure)[0]
@@ -368,6 +381,8 @@ class CPD(Factor):
     Its scope should be of the form [child, parent1, parent2, ...].
     Its beliefs will initially be normalized along the child axis. 
     """
+    #TODO: Is this the right design choice?
+    #I'm not liking the consequences of how this wraps Factor.
     def __init__(self, scope, beliefs):
         self._child = scope[0]
         self._parents = scope[1 : ]
@@ -380,28 +395,90 @@ class CPD(Factor):
     def parents(self):
         return self._parents
 
+class Adjacency(dict):
+    """
+    Encapsulates the adjacency list representation of a graph.
+    
+    Uses lazy evaluation whenever possible to accommodate very large graphs.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._heads = set()
+        self._tails = set()
+        self._rev = False
+        
+    def __iter__(self):
+        if self._rev:
+            return self._rev_edge_gen()
+        else:
+            return self._edge_gen()
+    def __reversed__(self):
+        if self._rev:
+            return self._edge_gen()
+        else:
+            return self._rev_edge_gen()
+    
+    def _edge_gen(self):
+        for (head, tails) in self.items():
+            for tail in tails:
+                yield (head, tail)
+    def _rev_edge_gen(self):
+        return (tuple(reversed(edge)) for edge in self._edge_gen())
+    
+    @property
+    def edges(self):
+        return self.__iter__()
+    @property
+    def heads(self):
+        if not self._heads:
+            self._heads = set(self.keys())
+        return self._heads
+    @property
+    def tails(self):
+        if not self._tails:
+            self._tails = set.union(*map(set, self.values()))
+        return self._tails
+    @property
+    def nodes(self):
+        return set.union(self.heads, self.tails)
+    
+    def reverse(self):
+        (self._heads, self._tails) = (self._tails, self._heads)
+        self._rev = not self._rev
+        
 class AdjacencyBuilderMixin:
     """
     Adds a method that builds a graph-like object from an adjacency list
     representation of the form:
     
     {'u_1' : ['v_4', 'v_3'], ... 'u_m' : ['v_1', 'v_3', 'v_n']}
+    
+    Also adds convenience methods, add_nodes and add_edges, for adding several
+    nodes or edges at once.
+    
+    Abstract mixin class, not intended for instantiation.
     """
-    def add_adjacencies(self, adjacencies, reverse = False):
+    def __init__(self):
+        pass
+    
+    def add_nodes(self, nodes):
+        for node in nodes:
+            self.add_node(node)
+    def add_edges(self, edges):
+        for edge in edges:
+            self.add_edge(edge)
+    def add_adjacencies(self, adjacencies = Adjacency()):
         """
-        adjacencies -- a dictionary of adjacency lists containing node names as strings
+        Add the nodes and edges represented by the adjacencies.
         """
-        self.add_nodes(set.union(set(adjacencies.keys()),
-                                     *map(set, adjacencies.values())))
-        if not reverse:
-            for (u, vs) in adjacencies.items():
-                for v in vs:
-                    self.add_edge((u, v))
-        else:
-            for (u, vs) in adjacencies.items():
-                for v in vs:
-                    self.add_edge((v, u))
-                
+        self.add_nodes(adjacencies.nodes)
+        self.add_edges(adjacencies.edges)
+        
+class AdjacencyGraph(Graph, AdjacencyBuilderMixin):
+    def __init__(self, adjacencies = Adjacency()):
+        super().__init__()
+        self.add_adjacencies(adjacencies)
+            
 class BipartiteGraph(Graph, AdjacencyBuilderMixin):
     """
     A BipartiteGraph is a Graph in which the vertices can be divided into
@@ -410,44 +487,53 @@ class BipartiteGraph(Graph, AdjacencyBuilderMixin):
     G = (U, V, E) is the usual representation of such a graph,
     with e == (u, v) for each e in E, for some (u, v) pair in UxV.
     
-    However this uses a more concise representation, the adjacency list.
+    However this relies on a more concise representation, the adjacency list.
     """
-    def __init__(self, adjacencies = None):
+    #TODO: This doesn't maintain its own invariant... Not very useful.
+    def __init__(self, adjacencies = Adjacency()):
         """
         Return a BipartiteGraph connecting vertices according to the input
         adjacencies.
         """
         super().__init__()
-        if adjacencies is not None:
-            U = set(adjacencies.keys())
-            V = set.union(*map(set, adjacencies.values()))
-            if U & V:
-                raise TypeError("Adjacencies do not form a bipartition!")
-            self.add_adjacencies(adjacencies)
+        U = set(adjacencies.heads)
+        V = set(adjacencies.tails)
+        if U & V:
+            raise TypeError("Adjacencies do not form a bipartition!")
+        self.add_adjacencies(adjacencies)
     
 class DirectedAcyclicGraph(DirectedGraph, AdjacencyBuilderMixin):
     """
     A DirectedAcyclicGraph is a DirectedGraph which has no cycles.
     """
-    def __init__(self, adjacencies = None, reverse = False):
+    #TODO: This doesn't maintain its own invariant... Not very useful.
+    def __init__(self, adjacencies = Adjacency()):
         super().__init__()
-        if adjacencies is not None:
-            self.add_adjacencies(adjacencies, reverse)
-            if find_cycle(self):
-                raise TypeError("Cycle detected!")
+        self.add_adjacencies(adjacencies)
+        if find_cycle(self):
+            raise TypeError("Cycle detected!")
     
 class BayesNet:
     def __init__(self, cpds, rvar_labels):
         self._cpds = cpds
         self._rvars = rvar_labels.keys()
-        self._adjacencies = {rvar_labels[cpd.child] : [rvar_labels[parent]
-                             for parent in cpd.parents] for cpd in cpds}
-        self._graph = DirectedAcyclicGraph(self._adjacencies, reverse = True)
+        self._adjacencies = Adjacency(
+                            {rvar_labels[cpd.child] : [rvar_labels[parent]
+                            for parent in cpd.parents] for cpd in cpds})
+        self._adjacencies.reverse()
+        self._graph = DirectedAcyclicGraph(self._adjacencies)
+        self._joint = None
         
     @property
     def graph(self):
         return self._graph
-        
+    @property
+    def joint(self):
+        #TODO: fix this -- as written, could lead to a post-evidence bug
+        if self._joint is None:
+            self._joint = Factor.joint(*self._cpds)
+        return self._joint
+    
 class Model:
     """
     A Model is a collection of RandomVariables together with Factors that encode
@@ -465,8 +551,34 @@ class Model:
         """
         Constructor
         """
-        pass
+        self.catalog = {}
     
+    def attach(self, **kwargs):
+        self.catalog.update(**kwargs)
+    
+class ClusterModel(Model):
+    """
+    A ClusterModel is a Model that has an undirected graph representing
+    the assignment of a set of Factors to disjoint cluster nodes.
+    
+    TODO: Improve this description. Explain responsibility.
+    """
+    @staticmethod
+    def _initial_potentials(clusters):
+        return {cluster_label : Factor.joint(*factors)
+                for (cluster_label, factors) in clusters}
+        
+    def __init__(self, clusters, adjacencies):
+        super().__init__()
+        self._potentials = self._initial_potentials(clusters)
+        self._graph = AdjacencyGraph(adjacencies)
+    
+    @property
+    def potentials(self):
+        return self._potentials
+    @property
+    def graph(self):
+        return self._graph
 
 if __name__ == '__main__':
     pass
