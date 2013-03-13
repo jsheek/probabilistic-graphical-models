@@ -1,3 +1,23 @@
+"""
+Copyright 2013, Justin P. Sheek <jsheek@gmail.com>
+
+This file is part of probabilistic-graphical-models, hereafter referred
+to as PGM.
+
+    PGM is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    PGM is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with PGM.  If not, see <http://www.gnu.org/licenses/>.
+"""
+
 '''
 Created on Feb 9, 2013
 
@@ -11,11 +31,11 @@ except ImportError:
     from collections import Sequence as AbstractSequence
 from pygraph.classes.graph import graph as Graph
 from pygraph.classes.digraph import digraph as DirectedGraph
+from pygraph.algorithms.sorting import topological_sorting
 from pygraph.algorithms.cycles import find_cycle
 
 #DONE: Implement 'RandomVariable' class
 #DONE: Implement 'Factor' class
-#TODO: Implement 'Model' class
 #DONE: Assignment #1: Introduction to Bayesian Networks
 #TODO: Assignment #2: Bayes Nets for Genetic Inheritance
 #TODO: Assignment #3: Markov Networks for OCR
@@ -74,12 +94,21 @@ class RandomVariable(Subject, AbstractSequence):
     
     Examples:
     (1) Binary random variable has state space (0, 1),
-        a.k.a. coin-flip ('H', 'T')
+        a.k.a. the coin-flip ('H', 'T')
     (2) The "classic" FICO score has a state space (300, 301, ..., 850)
         http://en.wikipedia.org/wiki/Credit_score_in_the_United_States#FICO_score_range
     
     In Physics, a RandomVariable is typically called a Local Field (Variable)
     or, in other contexts, a (Quantum) State.
+    
+    The definition here differs from the usual definition of a random variable
+    in -at least- two ways:
+    (i) The usual definition often requires a state space consisting of real-
+        valued states. In contrast, this object is more like a "random element".
+    (ii) More importantly, the usual definition often neglects to differentiate
+        between random variables and beliefs -about- those variables
+        (e.g. probability assignments). For more information, see:
+        http://en.wikipedia.org/wiki/Mind_projection_fallacy
     
     ---FOR NOW: ONLY IMPLEMENT DISCRETE RANDOM VARIABLES---
     TODO: Implement continuous random variables
@@ -101,7 +130,7 @@ class RandomVariable(Subject, AbstractSequence):
     def __init__(self, states):
         """
         Return a RandomVariable with the chosen state space,
-        representing the possible realizations of some random variable.
+        representing the possible realizations of this random variable.
         
         states -- the allowed (unique) instantiations of this random variable
         """
@@ -256,7 +285,8 @@ class Factor(Observer):
         (4, 2, 5, 6), (6, 7, 5), (3, 6, 2)
             -> (4, 2, 5, 6, 7, 3) up to permutation
         """
-        joint_scope = list(set.union(*(set(factor.scope) for factor in factors)))
+        joint_scope = list(set.union(set(), *(set(factor.scope)
+                        for factor in factors)))
         subscopes = [[rvar for rvar in joint_scope if rvar in factor.scope]
                         for factor in factors]
         permutations = [tuple(map(factor.scope.index, subscope))
@@ -267,7 +297,17 @@ class Factor(Observer):
         beliefs = [factor.beliefs.transpose(permutation)[slice_]
                         for (factor, permutation, slice_)
                         in zip(factors, permutations, slices)]
-        joint_beliefs = scipy.multiply.reduce(beliefs)
+        #scipy.multiply.reduce may not return an array in all circumstances;
+        #furthermore, it may return an array of sub-arrays
+        #TODO: rely on numpy 1.70 for access to keepdims = True
+        #joint_beliefs = scipy.multiply.reduce(beliefs, keepdims = True).squeeze()
+        #FOR NOW, use broadcast_arrays to match shapes of all beliefs
+        #before the multiply operation to prevent the array nesting bug...
+        #also, scipy.broadcast_arrays(*[]) fails so we need an explicit check
+        if beliefs:
+            joint_beliefs = scipy.multiply.reduce(scipy.broadcast_arrays(*beliefs))
+        else:
+            joint_beliefs = scipy.array(1)
         return Factor(joint_scope, joint_beliefs)
     @staticmethod
     def reordered(factor, target_scope):
@@ -323,8 +363,7 @@ class Factor(Observer):
         super().__init__()
         if not isinstance(beliefs, scipy.ndarray):
             raise NotImplementedError("'beliefs' must be a scipy/numpy array.")
-        assert all(isinstance(belief, (scipy.integer, scipy.floating))
-                   for belief in beliefs.flat), \
+        assert issubclass(beliefs.dtype.type, (scipy.integer, scipy.floating)), \
                 "The beliefs must all be real numbers."
         assert beliefs.ndim == len(scope), \
                 "The beliefs do not match the scope."
@@ -397,7 +436,8 @@ class CPD(Factor):
 
 class Adjacency(dict):
     """
-    Encapsulates the adjacency list representation of a graph.
+    Encapsulates the adjacency list representation of a graph, although
+    not as a list.
     
     Uses lazy evaluation whenever possible to accommodate very large graphs.
     """
@@ -405,19 +445,18 @@ class Adjacency(dict):
         super().__init__(*args, **kwargs)
         self._heads = set()
         self._tails = set()
-        self._rev = False
+        self._forward = True
         
     def __iter__(self):
-        if self._rev:
-            return self._rev_edge_gen()
-        else:
-            return self._edge_gen()
+        return self._view(self._forward)
     def __reversed__(self):
-        if self._rev:
+        return self._view(not self._forward)
+    
+    def _view(self, forward):
+        if forward:
             return self._edge_gen()
         else:
             return self._rev_edge_gen()
-    
     def _edge_gen(self):
         for (head, tails) in self.items():
             for tail in tails:
@@ -427,7 +466,7 @@ class Adjacency(dict):
     
     @property
     def edges(self):
-        return self.__iter__()
+        return iter(self)
     @property
     def heads(self):
         if not self._heads:
@@ -444,7 +483,7 @@ class Adjacency(dict):
     
     def reverse(self):
         (self._heads, self._tails) = (self._tails, self._heads)
-        self._rev = not self._rev
+        self._forward = not self._forward
         
 class AdjacencyBuilderMixin:
     """
@@ -474,7 +513,7 @@ class AdjacencyBuilderMixin:
         self.add_nodes(adjacencies.nodes)
         self.add_edges(adjacencies.edges)
         
-class AdjacencyGraph(Graph, AdjacencyBuilderMixin):
+class AdjacencyGraph(DirectedGraph, AdjacencyBuilderMixin):
     def __init__(self, adjacencies = Adjacency()):
         super().__init__()
         self.add_adjacencies(adjacencies)
@@ -499,7 +538,7 @@ class BipartiteGraph(Graph, AdjacencyBuilderMixin):
         U = set(adjacencies.heads)
         V = set(adjacencies.tails)
         if U & V:
-            raise TypeError("Adjacencies do not form a bipartition!")
+            raise ValueError("Adjacencies do not form a bipartition!")
         self.add_adjacencies(adjacencies)
     
 class DirectedAcyclicGraph(DirectedGraph, AdjacencyBuilderMixin):
@@ -511,7 +550,7 @@ class DirectedAcyclicGraph(DirectedGraph, AdjacencyBuilderMixin):
         super().__init__()
         self.add_adjacencies(adjacencies)
         if find_cycle(self):
-            raise TypeError("Cycle detected!")
+            raise ValueError("Cycle detected!")
     
 class BayesNet:
     def __init__(self, cpds, rvar_labels):
@@ -533,52 +572,159 @@ class BayesNet:
         if self._joint is None:
             self._joint = Factor.joint(*self._cpds)
         return self._joint
+
+class NodeScheduler:
+    """
+    A NodeScheduler is responsible for scheduling the visitation of nodes
+    in a graph.
+    
+    Different algorithms and graph types will rely on different schedules.
+    
+    This is a useful primitive in belief propagation, Gibbs sampling, etc.
+    """
+    @staticmethod
+    def round_robin(self):
+        raise NotImplementedError
+    @staticmethod
+    def topo_up_down(graph):
+        """
+        Return an iterator over the nodes of the graph that starts with the
+        leaf-most (latest topological) node, runs up to the root-most
+        (earliest topological) node, and pushes back down to the leaves,
+        excepting the leaf-most node.
+        
+        graph: A->B->C
+        return: (C, B, A, B)
+        """
+        tsort = topological_sorting(graph)
+        for node in reversed(tsort):
+            yield node
+        for node in tsort[1 : -1]:
+            yield node
+            
+    def __init__(self):
+        pass
+            
+class Cluster:
+    """
+    A Cluster is responsible for receiving messages from and emitting messages to
+    a Model. The messages are generic "potentials", but primarily these are just
+    joint Factors.
+    
+    This is a useful primitive in the belief propagation algorithm.
+    """
+    def __init__(self, factors):
+        self._potential = Factor.joint(*factors)
+        self._messages = {}
+    
+    @property
+    def scope(self):
+        return self._potential.scope
+    def flush(self):
+        self._messages.clear()
+    def receive(self, sender, message):
+        unrecognized = set(message.scope) - set(self.scope)
+        self._messages[sender] = Factor.marginalize(message, unrecognized)
+    def emit(self, excluded = set()):
+        messages = {message for (sender, message) in self._messages.items()
+                    if sender not in excluded}
+        return Factor.joint(self._potential, *messages)
     
 class Model:
     """
-    A Model is a collection of RandomVariables together with Factors that encode
-    beliefs about (subsets of) those variables and their interdependencies.
+    A Model is a collection of named entities.
+    
+    Entities can be attached.
+    
+    TODO: Clarify this!
+    """
+    def __init__(self, registry):
+        """
+        Constructor
+        """
+        self._registry = registry
+    
+    @property
+    def registry(self):
+        return self._registry
+    
+    def attach(self, **kwargs):
+        self._registry.update(**kwargs)
+    
+class GraphicalModel(Model):
+    """
+    A GraphicalModel is a Model with an associated Graph.
+    """
+    def __init__(self, graph = Graph()):
+        super().__init__()
+        self._graph = graph
+    
+    def add_graph(self, graph):
+        self._graph.add_graph(graph)
+        
+class FactorModel(Model):
+    """
+    A FactorModel is a collection of RandomVariables together with Factors that
+    encode beliefs about (subsets of) those variables and their interdependencies.
     
     Important examples include:
     (1) Bayesian Networks (including Bayes Classifiers, 2TBNs)
     (2) Markov Random Fields (including Ising Models, Restricted Boltzmann Machines)
-    (3) Non-graphical Models (?)
+    (3) Factor Graphs
+    (4) Non-graphical Models (?)
     
     ---FOR NOW: ONLY IMPLEMENT (1) and (2) ---
     """
     
     def __init__(self):
-        """
-        Constructor
-        """
-        self.catalog = {}
-    
-    def attach(self, **kwargs):
-        self.catalog.update(**kwargs)
+        super().__init__()
     
 class ClusterModel(Model):
     """
     A ClusterModel is a Model that has an undirected graph representing
-    the assignment of a set of Factors to disjoint cluster nodes.
+    the (surjective) assignment of a set of Factors to Cluster nodes.
     
     TODO: Improve this description. Explain responsibility.
     """
-    @staticmethod
-    def _initial_potentials(clusters):
-        return {cluster_label : Factor.joint(*factors)
-                for (cluster_label, factors) in clusters}
         
-    def __init__(self, clusters, adjacencies):
-        super().__init__()
-        self._potentials = self._initial_potentials(clusters)
+    def __init__(self, named_clusters, adjacencies):
+        super().__init__(named_clusters)
         self._graph = AdjacencyGraph(adjacencies)
+        self._scheduler = NodeScheduler()
     
     @property
-    def potentials(self):
-        return self._potentials
+    def clusters(self):
+        return self._registry.values()
     @property
     def graph(self):
         return self._graph
+    @property
+    def schedule(self):
+        return self._scheduler.topo_up_down(self.graph)
+    
+    def clusters_with(self, rvar):
+        return [cluster for cluster in self.clusters if rvar in cluster.scope]
+    def bp(self):
+        """
+        Belief propagation
+        """
+        for node in self.schedule:
+            sender = self.registry[node]
+            for neighbor in self.graph.neighbors(node):
+                receiver = self.registry[neighbor]
+                message = sender.emit(excluded = {neighbor})
+                receiver.receive(node, message)
+    def marginal(self, rvar):
+        """
+        Return the marginal over the input RandomVariable.
+        """
+        clusters = self.clusters_with(rvar)
+        if not clusters:
+            raise ValueError("Random variable not found among this model's clusters.")
+        #can sort by length of scope or w/e if this needs to be optimized
+        cluster = clusters[0]
+        aliens = set(cluster.scope) - {rvar}
+        return Factor.marginalize(cluster.emit(), aliens)
 
 if __name__ == '__main__':
     pass
