@@ -1,3 +1,23 @@
+"""
+Copyright 2013, Justin P. Sheek <jsheek@gmail.com>
+
+This file is part of probabilistic-graphical-models, hereafter referred
+to as PGM.
+
+    PGM is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    PGM is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with PGM.  If not, see <http://www.gnu.org/licenses/>.
+"""
+
 '''
 Created on Feb 12, 2013
 
@@ -139,6 +159,14 @@ class Test(unittest.TestCase):
         self.assertEqual(self.factors[1].sample(), (0, 1))
         self.assertEqual(self.factors[1].sample(), (1, 1))
         
-if __name__ == "__main__":
+    def testAdjacency(self):
+        self.adj = pgm.Adjacency({3 : [4, 5], 4 : [5, 6]})
+        self.adj.reverse()
+        self.assertEqual(list(self.adj), [(4, 3), (5, 3), (5, 4), (6, 4)])
+        self.assertEqual(list(reversed(self.adj)), [(3, 4), (3, 5), (4, 5), (4, 6)])
+        self.assertEqual(list(self.adj.heads), [4, 5, 6])
+        self.assertEqual(list(self.adj.tails), [3, 4])
+        
+if __name__ == '__main__':
     #import sys;sys.argv = ['', 'Test.testName']
     unittest.main()

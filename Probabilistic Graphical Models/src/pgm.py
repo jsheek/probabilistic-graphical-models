@@ -32,6 +32,7 @@ except ImportError:
 from pygraph.classes.graph import graph as Graph
 from pygraph.classes.digraph import digraph as DirectedGraph
 from pygraph.algorithms.sorting import topological_sorting
+from pygraph.algorithms.pagerank import pagerank
 from pygraph.algorithms.cycles import find_cycle
 
 #DONE: Implement 'RandomVariable' class
@@ -249,12 +250,12 @@ class Factor(Observer):
         """
         Return a Factor that combines the scope and beliefs of the input factors.
         
-        Does not modify the input.
-        
         factorA.scope, factorB.scope -> new_factor.scope:
         [c, a, d, e], [e, f, d] -> [c, a, d, e, f]
         factorA.beliefs.shape, factorB.beliefs.shape -> new_factor.shape:
         (4, 2, 5, 6), (6, 7, 5) -> (4, 2, 5, 6, 7)
+        
+        Does not modify the input.
         """
         B_not_A_scope = [rvar for rvar in factorB.scope if rvar not in factorA.scope]
         combined_scope = factorA.scope + B_not_A_scope
@@ -274,8 +275,6 @@ class Factor(Observer):
         """
         Return a Factor that combines the scope and beliefs of the input factors.
         
-        Does not modify the input.
-        
         factorA.scope, factorB.scope, factorC.scope
             -> new_factor.scope:
         [c, a, d, e], [e, f, d], [g, e, a]
@@ -284,6 +283,8 @@ class Factor(Observer):
             -> new_factor.shape:
         (4, 2, 5, 6), (6, 7, 5), (3, 6, 2)
             -> (4, 2, 5, 6, 7, 3) up to permutation
+            
+        Does not modify the input.
         """
         joint_scope = list(set.union(set(), *(set(factor.scope)
                         for factor in factors)))
@@ -319,6 +320,8 @@ class Factor(Observer):
         [a, b, c, d], [c, d, b, a] -> [c, d, b, a]
         factor.beliefs.shape, target_scope -> new_factor.beliefs.shape:
         (2, 3, 4, 5), [c, d, b, a] -> (4, 5, 3, 2)
+        
+        Does not modify the input.
         """
         #TODO: Strengthen this check or validate some other way."
         assert set(factor.scope) == set(target_scope), \
@@ -334,6 +337,14 @@ class Factor(Observer):
         target_shape = tuple(rvar.cardinality for rvar in target_scope)
         random_beliefs = scipy.random.random(target_shape)
         return Factor(target_scope, random_beliefs)
+    @staticmethod
+    def null():
+        """
+        Return a null Factor.
+        """
+        null_scope = []
+        null_beliefs = scipy.array(scipy.NaN)
+        return Factor(null_scope, null_beliefs)
     
     def _mutates_proxies(self = None):
         #TODO: Think about this design choice -- is this really what I want?
@@ -437,7 +448,10 @@ class CPD(Factor):
 class Adjacency(dict):
     """
     Encapsulates the adjacency list representation of a graph, although
-    not as a list.
+    as a dict.
+    
+    Reversing an Adjacency will result in a low-overhead representation
+    with each edge having reversed orientation.
     
     Uses lazy evaluation whenever possible to accommodate very large graphs.
     """
@@ -451,6 +465,12 @@ class Adjacency(dict):
         return self._view(self._forward)
     def __reversed__(self):
         return self._view(not self._forward)
+    def __str__(self):
+        if self._forward:
+            edge_symbol = '->'
+        else:
+            edge_symbol = '<-'
+        return ''.join([edge_symbol, super().__str__()])
     
     def _view(self, forward):
         if forward:
@@ -482,7 +502,7 @@ class Adjacency(dict):
         return set.union(self.heads, self.tails)
     
     def reverse(self):
-        (self._heads, self._tails) = (self._tails, self._heads)
+        (self._heads, self._tails) = (self.tails, self.heads)
         self._forward = not self._forward
         
 class AdjacencyBuilderMixin:
@@ -512,12 +532,22 @@ class AdjacencyBuilderMixin:
         """
         self.add_nodes(adjacencies.nodes)
         self.add_edges(adjacencies.edges)
-        
+
+class GraphMeta(type):
+    def __new__(cls, name, bases, dct):
+        return super().__new__(cls, name, bases, dct)
+            
 class AdjacencyGraph(DirectedGraph, AdjacencyBuilderMixin):
+    @classmethod
+    def directed(cls):
+        pass
+    @classmethod
+    def undirected(cls):
+        pass
     def __init__(self, adjacencies = Adjacency()):
         super().__init__()
         self.add_adjacencies(adjacencies)
-            
+    
 class BipartiteGraph(Graph, AdjacencyBuilderMixin):
     """
     A BipartiteGraph is a Graph in which the vertices can be divided into
@@ -583,8 +613,28 @@ class NodeScheduler:
     This is a useful primitive in belief propagation, Gibbs sampling, etc.
     """
     @staticmethod
-    def round_robin(self):
+    def round_robin(graph):
         raise NotImplementedError
+    @staticmethod
+    def by_pagerank(graph):
+        """
+        Probabilistic scheduler based on PageRank of nodes in the graph.
+        
+        Just for fun^^
+        """
+        ranks = pagerank(graph)
+        rvar = RandomVariable(list(ranks.keys()))
+        beliefs = scipy.array(list(ranks.values()))
+        factor = Factor([rvar], beliefs)
+        while 1:
+            yield factor.sample()[0]
+    @staticmethod
+    def uniform(graph):
+        rvar = RandomVariable(graph.nodes())
+        beliefs = scipy.ones(len(rvar))
+        factor = Factor([rvar], beliefs)
+        while 1:
+            yield factor.sample()[0]
     @staticmethod
     def topo_up_down(graph):
         """
@@ -594,7 +644,7 @@ class NodeScheduler:
         excepting the leaf-most node.
         
         graph: A->B->C
-        return: (C, B, A, B)
+        yields: (C, B, A, B)
         """
         tsort = topological_sorting(graph)
         for node in reversed(tsort):
@@ -620,6 +670,9 @@ class Cluster:
     @property
     def scope(self):
         return self._potential.scope
+    @property
+    def messages(self):
+        return self._messages
     def flush(self):
         self._messages.clear()
     def receive(self, sender, message):
@@ -682,7 +735,7 @@ class FactorModel(Model):
 class ClusterModel(Model):
     """
     A ClusterModel is a Model that has an undirected graph representing
-    the (surjective) assignment of a set of Factors to Cluster nodes.
+    the relationship between Cluster nodes.
     
     TODO: Improve this description. Explain responsibility.
     """
@@ -706,25 +759,66 @@ class ClusterModel(Model):
         return [cluster for cluster in self.clusters if rvar in cluster.scope]
     def bp(self):
         """
-        Belief propagation
+        Belief propagation.
         """
+#        if find_cycle(self.graph):
+#            raise ValueError("This model's graph has cycles!")
         for node in self.schedule:
             sender = self.registry[node]
             for neighbor in self.graph.neighbors(node):
                 receiver = self.registry[neighbor]
                 message = sender.emit(excluded = {neighbor})
                 receiver.receive(node, message)
+    def loopy_bp(self, tolerance = 1e-1, max_iter = 10):
+        """
+        Belief propagation for models with directed graphs that may have cycles.
+        
+        Approximate.
+        """
+        step = 0
+        close = 0
+        #TODO: refactor this
+        n = self.graph.order()
+        stats = {}
+        schedule = self._scheduler.uniform(self.graph)
+        for node in schedule:
+            sender = self.registry[node]
+            for neighbor in self.graph.neighbors(node):
+                receiver = self.registry[neighbor]
+                message = sender.emit(excluded = {neighbor})
+                prev_message = receiver.messages.get(node, Factor.null())
+                receiver.receive(node, message)
+                new_message = receiver.messages.get(node, Factor.null())
+                if scipy.allclose(prev_message.beliefs, new_message.beliefs, tolerance):
+                    close += 1
+                else:
+                    close /= 2
+                stats.setdefault((sender, receiver), 0)
+                stats[(sender, receiver)] += 1
+            step += 1
+            if step > n * max_iter:
+                print("Max iterations reached.")
+                print(close)
+                break
+            if close > n:
+                print("Message convergence reached.")
+                print(step)
+                break
+        return stats
     def marginal(self, rvar):
         """
         Return the marginal over the input RandomVariable.
+        
+        This is a Factor whose scope is just [rvar]. Only well-defined
+        when the model is calibrated.
         """
         clusters = self.clusters_with(rvar)
         if not clusters:
             raise ValueError("Random variable not found among this model's clusters.")
         #can sort by length of scope or w/e if this needs to be optimized
         cluster = clusters[0]
-        aliens = set(cluster.scope) - {rvar}
-        return Factor.marginalize(cluster.emit(), aliens)
+        undesired = set(cluster.scope) - {rvar}
+        return Factor.marginalize(cluster.emit(), undesired)
 
 if __name__ == '__main__':
     pass
