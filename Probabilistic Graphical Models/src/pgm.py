@@ -134,7 +134,8 @@ class RandomVariable(Subject, AbstractSequence):
             raise KeyError("{} is not a valid state.".format(self._hidden_state))
         #the following will reconstruct the states in the original order,
         #but as a tuple and, furthermore, with duplicates removed
-        self._states = tuple(sorted(self._ordering.keys(), key = self._ordering.get))
+        self._states = tuple(sorted(self._ordering.keys(),
+                                    key = self._ordering.get))
         self._cardinality = len(self._states)
         self._set_hidden_state()
         
@@ -157,6 +158,11 @@ class RandomVariable(Subject, AbstractSequence):
         #only returns 0 or 1 since the states are unique
         return 1 if value in self._ordering else 0
     
+    def __str__(self):
+        try:
+            return self.name
+        except AttributeError:
+            return super().__str__()
     def _set_hidden_state(self):
         self._hidden = True
         self._state = self._hidden_state
@@ -227,15 +233,15 @@ class Factor(Observer):
         Does not modify the input.
         """
         removal_scope = list(set(factor.scope) & set(scope))
-        restricted_scope = list(set(factor.scope) - set(removal_scope))
+        target_scope = [rvar for rvar in factor.scope if rvar not in scope]
         summed_axes = list(map(factor.scope.index, removal_scope))
-        #apply_over_axes produces an array of the same shape as factor.beliefs;
-        #however, we want the reduced dimensionality matching the restricted scope,
+        #apply_over_axes produces an array of the same ndim as factor.beliefs;
+        #however, we want the reduced dimensionality matching the target scope,
         #otherwise we will violate the constraints on Factor construction...
         #Warning: this may produce a 0-rank array
         summed_beliefs = scipy.apply_over_axes(scipy.sum, factor.beliefs,
                                                summed_axes).squeeze()
-        return Factor(restricted_scope, summed_beliefs)
+        return Factor(target_scope, summed_beliefs)
     @staticmethod
     def divergence(factorA, factorB):
         """
@@ -254,7 +260,7 @@ class Factor(Observer):
         beliefsB = reordered_factorB.beliefs
         Z_A = beliefsA.sum()
         Z_B = beliefsB.sum()
-        s = - beliefsA * scipy.log(beliefsB / beliefsA) / Z_A
+        s = -beliefsA * scipy.log(beliefsB / beliefsA) / Z_A
         #ignore nan values resulting from 0 * log(0 / 0)
         S = s[~scipy.isnan(s)].sum()
         return S + scipy.log(Z_B / Z_A)
@@ -270,7 +276,8 @@ class Factor(Observer):
         
         Does not modify the input.
         """
-        B_not_A_scope = [rvar for rvar in factorB.scope if rvar not in factorA.scope]
+        B_not_A_scope = [rvar for rvar in factorB.scope
+                         if rvar not in factorA.scope]
         combined_scope = factorA.scope + B_not_A_scope
         subscopeB = [rvar for rvar in combined_scope if rvar in factorB.scope]
         permutationB = tuple(map(factorB.scope.index, subscopeB))
@@ -343,6 +350,12 @@ class Factor(Observer):
         permutation = tuple(map(factor.scope.index, target_scope))
         #permuted_scope = [factor.scope[j] for j in permutation]
         return Factor(target_scope, factor.beliefs.transpose(permutation))
+    @staticmethod
+    def expanded(factor, target_scope):
+        if set(factor.scope) - set(target_scope):
+            raise ValueError("The factor scope must be contained in the target scope.")
+        diff_scope = list(set(target_scope) - set(factor.scope))
+        return Factor.joint(factor, Factor.uniform(diff_scope))
     @staticmethod
     def uniform(target_scope):
         """
@@ -567,9 +580,6 @@ class NodeScheduler:
     This is a useful primitive in belief propagation, Gibbs sampling, etc.
     """
     @staticmethod
-    def by_weight(graph):
-        raise NotImplementedError
-    @staticmethod
     def round_robin(graph):
         """
         Yield nodes of the graph.
@@ -631,7 +641,8 @@ class NodeScheduler:
         beliefs = scipy.array(list(ranks.values()))
         factor = Factor(scope, beliefs)
         while True:
-            yield factor.sample()[0]
+            node = factor.sample()[0]
+            yield node
     @staticmethod
     def uniform(graph):
         """
@@ -642,38 +653,21 @@ class NodeScheduler:
         beliefs = scipy.ones(len(rvar))
         factor = Factor(scope, beliefs)
         while True:
-            yield factor.sample()[0]
+            node = factor.sample()[0]
+            yield node
             
     def __init__(self):
         pass
     
-class TreeDecomposition:
-    @staticmethod
-    def virtual_var_elim(graph):
-        """
-        Return the TreeDecomposition associated with a virtual variable
-        elimination procedure.
-        
-        This procedure only makes sense when the input graph is a DAG.
-        """
-        maximal_cliques = []
-        eliminated_nodes = set()
-        induced_graph = Graph.moralized(graph)
-        schedule = NodeScheduler().by_var_elim_heuristic(induced_graph)
-        for node in schedule:
-            neighbors = set(induced_graph.neighbors(node))
-            this_scope = (neighbors | {node}) - eliminated_nodes
-            clique = Graph.undirected()
-            clique.add_nodes(this_scope)
-            clique.complete()
-            induced_graph.add_graph(clique)
-            if not any(scope > this_scope for scope in maximal_cliques):
-                maximal_cliques.append(this_scope)
-            eliminated_nodes.add(node)
-        tree_dec = TreeDecomposition()
-        tree_dec.graph = induced_graph
-        tree_dec.cliques = maximal_cliques
-        return tree_dec
+class Graph:
+    #TODO: work on this abstraction
+    @classmethod
+    def directed(cls):
+        return DirectedGraph()
+    @classmethod
+    def undirected(cls):
+        return UndirectedGraph()
+    
     @staticmethod
     def estimate_treewidth(graph):
         """
@@ -688,41 +682,6 @@ class TreeDecomposition:
         delta = (sum(node_orders) + 1) / n
         epsilon = (delta - 1) / (delta + 1)
         return int(n ** epsilon)
-    
-    def __init__(self):
-        pass
-    
-    @property
-    def graph(self):
-        return self._graph
-    @property
-    def cliques(self):
-        return self._cliques
-    @property
-    def width(self):
-        """
-        The induced width is the size of the largest clique.
-        
-        (The induced width lower-bounds the running time of exact inference
-        on the induced graph.)
-        """
-        return max(len(clique) for clique in self.cliques)
-    @graph.setter
-    def graph(self, graph):
-        self._graph = graph
-    @cliques.setter
-    def cliques(self, cliques):
-        self._cliques = cliques
-        
-class Graph:
-    #TODO: work on this abstraction
-    @classmethod
-    def directed(cls):
-        return DirectedGraph()
-    @classmethod
-    def undirected(cls):
-        return UndirectedGraph()
-    
     @staticmethod
     def clique_of(graph, node):
         neighbors = set(graph.neighbors(node))
@@ -753,13 +712,16 @@ class Graph:
             moral_graph.add_graph(parent_graph)
         return moral_graph
     @staticmethod
-    def virtual_var_elim(graph, schedule = None):
+    def virtual_var_elim(graph):
         """
         Return the maximal cliques associated with a virtual variable
         elimination procedure. The cliques that are constructed will depend on
         the schedule of nodes.
         
         Finding the optimal schedule is NP-complete.
+        
+        So, we use a fast heuristic based on "minimum deficiency".
+        http://www.cse.ust.hk/~lzhang/teach/5213/slides/l04.1.p.pdf
         
         This procedure only makes sense when the input graph is a DAG.
         """
@@ -769,16 +731,25 @@ class Graph:
         clique = {}
         deficiency = {}
         while induced_graph.nodes():
-            for node in volatile_nodes:
-                clique[node] = Graph.clique_of(induced_graph, node)
-                deficiency[node] = Graph.deficiency_of(induced_graph, clique[node])
+            #only re-compute cliques and deficiencies of nodes that may have changed
+            #in the previous iteration...
+            #in large graphs, this is probably significantly more efficient
+            for v_node in volatile_nodes:
+                clique[v_node] = Graph.clique_of(induced_graph, v_node)
+                deficiency[v_node] = Graph.deficiency_of(induced_graph,
+                                                         clique[v_node])
+            #select the node for elimination according to "minimal deficiency"
             node = min(deficiency.keys(), key = deficiency.get)
             this_scope = set(clique[node].nodes())
             if not any(scope > this_scope for scope in maximal_cliques):
                 maximal_cliques.append(this_scope)
-            markov_blankets = (set(induced_graph.neighbors(node)) for node in this_scope)
+            #find the nodes whose cliques and deficiencies may have changed
+            markov_blankets = (set(induced_graph.neighbors(node))
+                               for node in this_scope)
             volatile_nodes = set.union(*markov_blankets)
+            #add the clique induced by variable elimination to the induced graph 
             induced_graph.add_graph(clique[node])
+            #eliminate the node from all consideration
             induced_graph.del_node(node)
             volatile_nodes.discard(node)
             clique.pop(node)
@@ -786,6 +757,10 @@ class Graph:
         return maximal_cliques
     @staticmethod
     def weighted_by_intersection(cliques):
+        """
+        Return a complete clique graph, with edges weighted by the cardinality
+        of the intersection of the clique scopes.
+        """
         weighted_clique_graph = Graph.undirected()
         weighted_clique_graph.add_nodes([tuple(clique) for clique in cliques])
         weighted_clique_graph.complete()
@@ -819,32 +794,42 @@ class Graph:
     def maximal_spanning_tree(weighted_graph):
         #pygraph's minimal spanning tree algorithm does not correctly handle
         #negative edge weights, nor does it return a graph!
-        #so we use this to compute the maximal spanning tree, instead of the
-        #usual method of flipping signs
-        min_weight = min(weighted_graph.edge_weight(edge)
-                         for edge in weighted_graph.edges())
+        #so we use this to compute the maximal spanning tree
         reweighted_graph = Graph.undirected()
         reweighted_graph.add_graph(weighted_graph)
         for edge in weighted_graph.edges():
             weight = weighted_graph.edge_weight(edge)
-            reweighted_graph.set_edge_weight(edge, 1 / (1 + weight - min_weight))
+            reweighted_graph.set_edge_weight(edge, -weight)
+#        min_weight = min(weighted_graph.edge_weight(edge)
+#                         for edge in weighted_graph.edges())
+#        reweighted_graph = Graph.undirected()
+#        reweighted_graph.add_graph(weighted_graph)
+#        for edge in weighted_graph.edges():
+#            weight = weighted_graph.edge_weight(edge)
+#            reweighted_graph.set_edge_weight(edge, 1 / (1 + weight - min_weight))
         return Graph.minimal_spanning_tree(reweighted_graph)
     @staticmethod
-    def tree_decomposition(graph, schedule = None):
+    def tree_decomposition(graph):
+        """
+        Return the (clique) tree decomposition of a DAG.
+        
+        http://ai.stanford.edu/~paskin/gm-short-course/lec3.pdf
+        """
         #---recipe to turn a DAG into a clique tree---
         #(0) start with a DAG
         #(1) choose an ordering over its nodes
-        #(2) use virtual variable elimination to compute maximal cliques induced by this ordering
-        #(3) build a complete clique graph with edges weighted by intersection counts
+        #(2) use virtual variable elimination to compute maximal cliques induced
+        #    by this ordering
+        #(3) build a complete clique graph with edges weighted by intersection
+        #    counts
         #(4) return the maximal spanning tree of that graph
         
         #since this can result in really bad widths of the resulting clique tree,
-        #we will default to using "minimum deficiency search" to choose the next node on-the-fly,
-        #which is the best heuristic available, it seems
-        maximal_cliques = Graph.virtual_var_elim(graph, schedule)
+        #we will default to using "minimum deficiency search" to choose the
+        #next node on-the-fly, which is the best heuristic available, it seems
+        maximal_cliques = Graph.virtual_var_elim(graph)
         weighted_clique_graph = Graph.weighted_by_intersection(maximal_cliques)
-        clique_tree = Graph.maximal_spanning_tree(weighted_clique_graph)
-        return clique_tree
+        return Graph.maximal_spanning_tree(weighted_clique_graph)
     
     def __init__(self):
         pass
@@ -896,13 +881,19 @@ class Cluster:
     
     This is a useful primitive in the belief propagation algorithm.
     """
-    def __init__(self, factors):
+    def __init__(self, factors, scope = None):
         self._potential = Factor.joint(*factors)
         self._messages = {}
+        if scope is not None:
+            expanded_potential = Factor.expanded(self._potential, scope)
+            self._potential = Factor.reordered(expanded_potential, scope)
+    
+    def __str__(self):
+        return str(tuple(str(rvar) for rvar in self.scope))
     
     @property
     def scope(self):
-        return self._potential.scope
+        return tuple(self._potential.scope)
     @property
     def messages(self):
         return self._messages
@@ -1068,7 +1059,7 @@ class ClusterModel(Model):
         return Factor.marginalize(cluster.emit(), undesired)
     
 class BayesNet:
-    #TODO: take advantage of Model as a base class
+    #TODO: take advantage of GraphicalModel as a base class
     def __init__(self, cpds, rvar_labels):
         self._cpds = cpds
         self._rvars = rvar_labels.keys()
@@ -1097,56 +1088,67 @@ class CliqueTreeModel(GraphicalModel):
     Responsible for running exact inference over the Clique beliefs.
     """
     @staticmethod
-    def generate(cliques):
-        clique_tree = Graph.undirected()
-        for clique in cliques:
-            clique_name = ''.join(str(node) for node in clique)
-            for other_clique in cliques:
-                pass
-        return None
+    def _default_scheduler():
+        return NodeScheduler.level_up_down
     
-    def __init__(self, named_clusters, adjacencies):
-        super().__init__()
-        self.attach(named_clusters)
-        self._graph = AdjacencyGraph(adjacencies)
-        self._scheduler = NodeScheduler()
+    def __init__(self, clique_tree):
+        super().__init__(clique_tree)
+        self._scheduler = self._default_scheduler()
     
-    @property
-    def clusters(self):
-        return self._registry.values()
     @property
     def graph(self):
         return self._graph
     @property
+    def cliques(self):
+        return self._graph.nodes()
+    @property
     def schedule(self):
-        return self._scheduler.topo_up_down(self.graph)
+        return self._scheduler(self.graph)
+    @property
+    def scheduler(self):
+        return self._scheduler
+    @scheduler.setter
+    def scheduler(self, scheduler):
+        self._scheduler = scheduler
+    @property
+    def width(self):
+        """
+        The induced width is the size of the largest clique.
+        
+        (The induced width lower-bounds the running time of exact inference
+        on the induced graph.)
+        """
+        return max(len(clique) for clique in self.cliques)
     
-    def clusters_with(self, rvar):
-        return [cluster for cluster in self.clusters if rvar in cluster.scope]
+    def reset(self):
+        for clique in self.cliques:
+            clique.flush()
+    def cliques_with(self, rvar):
+        return [clique for clique in self.cliques if rvar in clique.scope]
+    def select_clique_with(self, rvar):
+        cliques = self.cliques_with(rvar)
+        if not cliques:
+            raise ValueError("Random variable not found among this model's cliques.")
+        #can sort by length of scope or w/e if this needs to be optimized
+        return cliques[0]
     def bp(self):
         """
         Belief propagation.
         """
-        for node in self.schedule:
-            sender = self.registry[node]
-            for neighbor in self.graph.neighbors(node):
-                receiver = self.registry[neighbor]
-                message = sender.emit(excluded = {neighbor})
-                receiver.receive(node, message)
+        for sender in self.schedule:
+            for receiver in self.graph.neighbors(sender):
+                message = sender.emit(excluded = {receiver})
+                receiver.receive(sender, message)
     def marginal(self, rvar):
         """
-        Return the marginal over the input RandomVariable.
+        Return the marginal over all but the input RandomVariable.
         
         This is a Factor whose scope is just [rvar]. Only well-defined
         when the model is calibrated.
         """
-        clusters = self.clusters_with(rvar)
-        if not clusters:
-            raise ValueError("Random variable not found among this model's clusters.")
-        #can sort by length of scope or w/e if this needs to be optimized
-        cluster = clusters[0]
-        undesired = set(cluster.scope) - {rvar}
-        return Factor.marginalize(cluster.emit(), undesired)
+        clique = self.select_clique_with(rvar)
+        undesired = set(clique.scope) - {rvar}
+        return Factor.marginalize(clique.emit(), undesired)
 
 if __name__ == '__main__':
     pass
